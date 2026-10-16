@@ -48,6 +48,10 @@ const isWatched = (item) => state.watchlist.some((w) => watchKey(w.kind, w.id) =
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
+  if (res.status === 401 && !path.startsWith('/api/auth/')) {
+    showGate();
+    throw new Error('Please log in');
+  }
   if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
   return res.json();
 }
@@ -187,6 +191,7 @@ function render() {
   $('#watch-count').textContent = state.watchlist.length || '';
   $('#alert-count').textContent = state.alerts?.unread || '';
   const listTab = LIST_TABS.includes(tab);
+  $('#refresh').hidden = !listTab && tab !== 'lookup';
   $('#controls').hidden = !listTab && tab !== 'lookup';
   $('#lookup-form').hidden = tab !== 'lookup';
   document.querySelectorAll('.list-only').forEach((el) => (el.hidden = !listTab));
@@ -197,6 +202,7 @@ function render() {
   if (tab === 'watchlist') return renderWatchlist();
   if (tab === 'lookup') return renderLookup();
   if (tab === 'alerts') return renderAlerts();
+  if (tab === 'account') return renderAccount();
 
   const list = $('#list');
   if (state.loading && !state.data) {
@@ -307,6 +313,7 @@ const closeDrawer = () => {
 // ---------- data ----------
 async function load({ refresh = false } = {}) {
   if (prefs.tab === 'lookup') return state.lookup?.name ? lookup(state.lookup.name, { refresh }) : render();
+  if (prefs.tab === 'account') return loadAccount({ sync: refresh });
   if (!LIST_TABS.includes(prefs.tab)) return render();
   const id = ++state.requestId;
   state.loading = true;
@@ -563,16 +570,22 @@ function renderAlerts() {
         <span class="chips">${s.countries.map((c) => `<span class="chip on">${esc(COUNTRIES[c] ?? c)}${s.countries.length > 1 ? `<button type="button" data-action="rm-country" data-c="${c}" aria-label="Remove ${esc(c)}">×</button>` : ''}</span>`).join('')}
         ${s.countries.length < 3 ? `<select id="country-add"><option value="">+ add (max 3)</option>${Object.entries(COUNTRIES).filter(([c]) => !s.countries.includes(c)).map(([c, n]) => `<option value="${c}">${esc(n)}</option>`).join('')}</select>` : ''}</span>
       </label>
-      <label>Check every
+      ${A.cloud
+        ? '<p class="note">Checks run once a day, at about 8am US Central, using a Vercel cron job.</p>'
+        : `<label>Check every
         <select id="interval">${[6, 12, 24, 48].map((h) => `<option value="${h}" ${h === s.intervalHours ? 'selected' : ''}>${h} hours</option>`).join('')}</select>
-      </label>
-      <label class="check"><input id="desktop" type="checkbox" ${s.desktop ? 'checked' : ''}> Desktop notifications (works with the browser closed)</label>
+      </label>`}
+      ${A.cloud && !A.email
+        ? '<p class="note">Email alerts aren\'t set up. Add RESEND_API_KEY and ALERT_EMAIL in Vercel to get them.</p>'
+        : `<label class="check"><input id="desktop" type="checkbox" ${s.desktop ? 'checked' : ''}> ${A.cloud
+          ? `Email alerts to ${esc(A.email)}`
+          : `Desktop notifications (works with the browser closed)${A.email ? ` and email to ${esc(A.email)}` : ''}`}</label>`}
       ${canNotify && Notification.permission !== 'granted'
         ? `<button class="btn" type="button" data-action="notify-perm">Also notify me in this browser</button>`
         : ''}
     </div>
     <p class="note">${s.lastRun ? `Last check ${timeAgo(s.lastRun)}: ${last.charts} chart${last.charts === 1 ? '' : 's'} collected, ${last.alerts} new alert${last.alerts === 1 ? '' : 's'}.` : 'No check has run yet.'}
-      The server checks while it's running; leave <code>npm start</code> open (or run it at login) to keep collecting.</p>
+      ${A.cloud ? '' : 'The server checks while it\'s running; leave <code>npm start</code> open (or run it at login) to keep collecting.'}</p>
     ${last?.errors?.length ? `<details class="note"><summary>${last.errors.length} part${last.errors.length === 1 ? '' : 's'} couldn't be fetched</summary><ul>${last.errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></details>` : ''}
     <div class="actions">
       ${A.offline
@@ -603,6 +616,18 @@ function renderAlerts() {
 
 async function handleAction(btn) {
   const a = btn.dataset.action;
+  if (a === 'sync-account') return loadAccount({ sync: true });
+  if (a === 'all-videos') {
+    state.showAllVideos = true;
+    return render();
+  }
+  if (a === 'disconnect') {
+    if (!confirm('Disconnect your TikTok account? Saved snapshots are deleted too.')) return;
+    await api('/api/account/disconnect', { method: 'POST' });
+    state.account = null;
+    if (state.me?.cloud) return location.reload();
+    return loadAccount();
+  }
   if (a === 'lookup') return lookup(btn.dataset.name);
   if (a === 'refresh-lookup') return lookup(state.lookup.name, { refresh: true });
   if (a === 'toggle-keyword') return toggleKeyword(btn.dataset.name);
@@ -635,11 +660,246 @@ async function handleAction(btn) {
   }
 }
 
+
+// ---------- my account ----------
+const TZ = (() => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+})();
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const BLOCK_NAMES = ['12–4am', '4–8am', '8am–12pm', '12–4pm', '4–8pm', '8pm–12am'];
+const INSIGHT_ICONS = { hot: '🔥', time: '🕒', length: '⏱', tag: '#', engage: '💬', cadence: '📅', trend: '📈', info: 'ℹ️' };
+const VIDEO_SORTS = {
+  newest: ['Newest', (a, b) => b.createdAt - a.createdAt],
+  views: ['Views', (a, b) => b.views - a.views],
+  engagement: ['Engagement', (a, b) => b.engagement - a.engagement],
+  perDay: ['Views / day', (a, b) => b.viewsPerDay - a.viewsPerDay],
+  gained: ['Gained this week', (a, b) => (b.gained7d ?? -1) - (a.gained7d ?? -1)],
+};
+const signed = (n) => (n == null ? '' : `${n >= 0 ? '+' : '−'}${compact(Math.abs(n))}`);
+
+async function loadAccount({ sync = false } = {}) {
+  state.accountLoading = true;
+  render();
+  try {
+    state.account = await api(`/api/account${sync ? '/sync' : ''}?tz=${encodeURIComponent(TZ)}`, sync ? { method: 'POST' } : undefined);
+    state.accountError = null;
+  } catch (err) {
+    state.accountError = err.message;
+  } finally {
+    state.accountLoading = false;
+  }
+  render();
+}
+
+function heatmap(times) {
+  const cell = new Map(times.map((t) => [`${t.day}:${t.block}`, t]));
+  const max = Math.max(1.5, ...times.map((t) => t.performance));
+  const rows = DAY_NAMES.map((d, day) => `<div class="hm-row"><span>${d}</span>${BLOCK_NAMES.map((_, block) => {
+    const t = cell.get(`${day}:${block}`);
+    if (!t) return '<i class="hm-cell blank"></i>';
+    const alpha = Math.max(0.12, Math.min(1, t.performance / max));
+    return `<i class="hm-cell" style="--a:${alpha.toFixed(2)}" title="${DAY_NAMES[day]} ${BLOCK_NAMES[block]}: ${t.count} video${t.count === 1 ? '' : 's'}, ${t.performance}× typical views">${t.count}</i>`;
+  }).join('')}</div>`).join('');
+  return `<div class="heatmap"><div class="hm-row hm-head"><span></span>${BLOCK_NAMES.map((b) => `<b>${b}</b>`).join('')}</div>${rows}</div>
+    <p class="note">Numbers are how many videos you posted in that slot; brighter means more views than your typical video. Times are in ${esc(TZ)}.</p>`;
+}
+
+function perfBars(groups, labelFn) {
+  if (!groups.length) return '<p class="note">Not enough videos yet.</p>';
+  const max = Math.max(...groups.map((g) => g.performance), 1);
+  return groups
+    .map((g) => `<div class="bar"><span>${esc(labelFn(g))}</span>
+      <div class="bar-track"><i style="width:${Math.max(3, (g.performance / max) * 100)}%"></i></div>
+      <b title="${g.count} videos">${g.performance}×</b></div>`)
+    .join('');
+}
+
+function renderAccount() {
+  $('#summary').innerHTML = '';
+  $('#warning').hidden = true;
+  const list = $('#list');
+  const A = state.account;
+  if (state.accountLoading && !A) {
+    list.innerHTML = '<div class="skeleton tall"></div><div class="skeleton tall"></div>';
+    return;
+  }
+  if (state.accountError && !A) {
+    list.innerHTML = `<div class="empty">Couldn't load your account: ${esc(state.accountError)}</div>`;
+    return;
+  }
+  if (!A) return;
+  if (!A.configured) {
+    list.innerHTML = `<section class="panel connect">
+      <h2>Connect your TikTok</h2>
+      <p>TikTok login isn't set up yet. You need a free TikTok developer app; the README has step-by-step instructions
+      (“Connect your TikTok account”). Then set <code>TIKTOK_CLIENT_KEY</code>, <code>TIKTOK_CLIENT_SECRET</code>
+      and <code>TIKTOK_USERNAME</code>.</p></section>`;
+    return;
+  }
+  if (!A.connected) {
+    list.innerHTML = `<section class="panel connect">
+      <h2>Connect your TikTok</h2>
+      <p>Log in with TikTok to analyze your own videos: growth, engagement, your best posting times, what lengths and hashtags work for you,
+      and which trends you haven't jumped on yet.</p>
+      <p class="note">You approve on TikTok's own page; this app never sees your password. It only gets read access to your profile and public videos.</p>
+      <div class="actions"><a class="btn primary" href="/api/auth/tiktok">Log in with TikTok</a></div></section>`;
+    return;
+  }
+
+  const p = A.profile;
+  const a = A.analysis;
+  const sortKey = VIDEO_SORTS[prefs.videoSort] ? prefs.videoSort : 'newest';
+  const vids = [...a.videos].sort(VIDEO_SORTS[sortKey][1]);
+  const shown = state.showAllVideos ? vids : vids.slice(0, 15);
+  const chartW = Math.max(280, Math.min(1000, list.clientWidth - 38));
+  const stat = (label, value, change) =>
+    `<div class="stat"><span>${esc(label)}</span><b>${esc(value)}</b>${change ? `<small class="${change.startsWith('−') ? 'down' : 'up'}">${esc(change)} this week</small>` : ''}</div>`;
+
+  list.innerHTML = `
+  ${p.needsReconnect || A.syncError ? `<div class="warning">${esc(A.syncError || 'TikTok sign-in expired.')}
+    ${p.needsReconnect ? ' <a class="btn" href="/api/auth/tiktok">Reconnect</a>' : ''}</div>` : ''}
+  <section class="panel">
+    <div class="acct-head">
+      ${p.avatarUrl ? `<img class="avatar" src="${esc(p.avatarUrl)}" alt="" referrerpolicy="no-referrer">` : '<div class="avatar"></div>'}
+      <div class="acct-name"><h2>${esc(p.displayName)}${p.verified ? ' <span title="Verified">✔</span>' : ''}</h2>
+        <div class="sub">${p.username ? `@${esc(p.username)}` : ''}${A.syncedAt ? ` · synced ${timeAgo(A.syncedAt)}` : ''}</div></div>
+      <div class="actions tight">
+        <button class="btn" type="button" data-action="sync-account" ${state.accountLoading ? 'disabled' : ''}>${state.accountLoading ? 'Syncing…' : 'Sync now'}</button>
+        ${p.profileUrl ? `<a class="btn" href="${esc(p.profileUrl)}" target="_blank" rel="noopener">Profile ↗</a>` : ''}
+      </div>
+    </div>
+    <div class="kv four">
+      ${stat('Followers', compact(p.followers), signed(a.followers.change7d))}
+      ${stat('Total likes', compact(p.likes))}
+      ${stat('Typical views', compact(a.totals.typicalViews))}
+      ${stat('Avg. engagement', `${a.totals.avgEngagement}%`)}
+    </div>
+  </section>
+
+  <section class="panel">
+    <h3>What the numbers say</h3>
+    <ul class="insights">${a.insights.map((i) => `<li><span aria-hidden="true">${INSIGHT_ICONS[i.kind] ?? '•'}</span>${esc(i.text)}</li>`).join('')}</ul>
+    ${A.trendingSource == null || A.trendingSource === 'sample' ? '<p class="note">Trend matching is off until live trend data loads.</p>' : ''}
+  </section>
+
+  ${a.trendingNew.length ? `<section class="panel"><h3>Trending now, not used by you yet</h3>
+    <div class="chips">${a.trendingNew.map((t) => `<button class="chip" type="button" data-action="lookup" data-name="${esc(t.name)}">${esc(t.name)} <small class="pill-mini ${t.status}">${esc(t.status)}</small></button>`).join('')}</div></section>` : ''}
+
+  <section class="panel">
+    <h3>Followers</h3>
+    ${a.followers.series.length > 1
+      ? bigChart(a.followers.series.map((pt) => ({ t: pt.at / 1000, v: pt.v })), (v) => compact(v), chartW)
+      : '<p class="note">A snapshot is saved every day, so this chart fills in over the next few days.</p>'}
+  </section>
+
+  <section class="panel">
+    <h3>Best times to post</h3>
+    ${a.times.length ? heatmap(a.times) : '<p class="note">Not enough videos older than 3 days yet.</p>'}
+    <div class="cols">
+      <div><h3>Video length</h3>${perfBars(a.lengths, (g) => g.label)}</div>
+      <div><h3>Your hashtags</h3>${perfBars(a.tags.slice(0, 8), (g) => `#${g.key}`)}</div>
+    </div>
+    <p class="note">× means views compared with your typical video (${compact(a.totals.typicalViews)} views). Only videos 3+ days old are counted.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h3>Your videos (${a.videos.length})</h3>
+      <label class="note">Sort <select id="video-sort">${Object.entries(VIDEO_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === sortKey ? 'selected' : ''}>${label}</option>`).join('')}</select></label>
+    </div>
+    ${shown.map((v) => `<div class="vrow">
+      <div class="thumb tall">${v.cover ? `<img src="${esc(v.cover)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : ''}</div>
+      <div class="vmain"><div class="name">${v.url ? `<a href="${esc(v.url)}" target="_blank" rel="noopener">${esc(v.title || v.description || 'Untitled')}</a>` : esc(v.title || v.description || 'Untitled')}</div>
+        <div class="sub">${new Date(v.createdAt).toLocaleDateString()} · ${v.duration}s${v.tags.length ? ` · ${v.tags.slice(0, 4).map((t) => `#${esc(t)}`).join(' ')}` : ''}</div></div>
+      <div class="metric"><b>${compact(v.views)}</b>views${v.gained7d != null ? ` · +${compact(v.gained7d)} wk` : ''}</div>
+      <div class="metric"><b>${v.engagement}%</b>engagement</div>
+      <div>${v.label ? `<span class="pill ${v.label === 'hit' ? 'breakout' : 'cooling'}">${v.label === 'hit' ? `${v.performance}× hit` : 'low'}</span>` : `<span class="note">${v.performance}×</span>`}</div>
+    </div>`).join('')}
+    ${vids.length > shown.length ? `<div class="actions center"><button class="btn" type="button" data-action="all-videos">Show all ${vids.length}</button></div>` : ''}
+  </section>
+
+  <div class="actions"><button class="btn" type="button" data-action="disconnect">Disconnect TikTok</button></div>`;
+}
+
+// ---------- login gate ----------
+function showGate(message) {
+  const me = state.me ?? {};
+  const gate = $('#gate');
+  gate.hidden = false;
+  $('#gate-error').hidden = !message;
+  $('#gate-error').textContent = message ?? '';
+  if (me.setupError) {
+    $('#gate-body').innerHTML = `<p>Almost there. One setting is missing:</p><p class="note">${esc(me.setupError)}</p>`;
+    return;
+  }
+  $('#gate-body').innerHTML = `
+    ${me.login?.tiktok ? '<a class="btn primary wide" href="/api/auth/tiktok">Log in with TikTok</a>' : ''}
+    ${me.login?.tiktok && me.login?.password ? '<p class="note or">or</p>' : ''}
+    ${me.login?.password ? `<form id="pw-form" class="inline-form">
+      <input id="pw" type="password" placeholder="App password" autocomplete="current-password" aria-label="App password" required>
+      <button class="btn primary" type="submit">Log in</button></form>` : ''}`;
+  $('#pw-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/auth/password', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ password: $('#pw').value }),
+      });
+      location.reload();
+    } catch (err) {
+      showGate(err.message);
+    }
+  });
+}
+
+async function boot() {
+  const params = new URLSearchParams(location.search);
+  const authError = params.get('auth_error');
+  if (authError || location.hash === '#account') {
+    if (location.hash === '#account') prefs.tab = 'account';
+    history.replaceState(null, '', location.pathname);
+  }
+  try {
+    state.me = await api('/api/me');
+  } catch (err) {
+    $('#list').innerHTML = `<div class="empty">Couldn't reach the server: ${esc(err.message)}</div>`;
+    return;
+  }
+  const me = state.me;
+  if (me.cloud) {
+    $('#brand-sub').hidden = true;
+    document.title = 'TrendTok';
+  }
+  if (me.setupError || !me.loggedIn) return showGate(authError);
+  if (authError) {
+    $('#warning').hidden = false;
+    $('#warning').textContent = authError;
+  }
+  $('#logout').hidden = !me.cloud;
+  if (me.cloud && me.storage === 'temporary') {
+    console.warn('No database connected: data will be lost between deploys. Add Upstash Redis in Vercel → Storage.');
+  }
+  api('/api/watchlist')
+    .then((w) => {
+      state.watchlist = w;
+      render();
+    })
+    .catch(() => {});
+  if (prefs.tab === 'lookup' && prefs.lookup) state.lookup = { name: prefs.lookup };
+  load();
+  refreshAlerts();
+  setInterval(refreshAlerts, 60_000);
+}
+
 // ---------- events ----------
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => prefs.tab === 'lookup' && render(), 150);
+  resizeTimer = setTimeout(() => (prefs.tab === 'lookup' || prefs.tab === 'account') && render(), 150);
 });
 $('#country').innerHTML = Object.entries(COUNTRIES)
   .map(([code, name]) => `<option value="${code}">${esc(name)}</option>`)
@@ -673,6 +933,10 @@ $('#sort').addEventListener('change', (e) => {
 });
 ['#search', '#niche', '#rising'].forEach((s) => $(s).addEventListener('input', render));
 $('#refresh').addEventListener('click', () => load({ refresh: true }));
+$('#logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  location.reload();
+});
 $('#lookup-form').addEventListener('submit', (e) => {
   e.preventDefault();
   lookup($('#lookup-input').value);
@@ -690,6 +954,10 @@ $('#list').addEventListener('change', (e) => {
     saveAlertSettings({ countries: [...state.alerts.settings.countries, e.target.value] });
   } else if (e.target.id === 'interval') {
     saveAlertSettings({ intervalHours: Number(e.target.value) });
+  } else if (e.target.id === 'video-sort') {
+    prefs.videoSort = e.target.value;
+    savePrefs();
+    render();
   } else if (e.target.id === 'desktop') {
     saveAlertSettings({ desktop: e.target.checked });
   }
@@ -723,13 +991,4 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeDrawer();
 });
 
-api('/api/watchlist')
-  .then((w) => {
-    state.watchlist = w;
-    render();
-  })
-  .catch(() => {});
-if (prefs.tab === 'lookup' && prefs.lookup) state.lookup = { name: prefs.lookup };
-load();
-refreshAlerts();
-setInterval(refreshAlerts, 60_000);
+boot();

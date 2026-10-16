@@ -1,6 +1,6 @@
-# TrendTok Local
+# TrendTok
 
-A personal, run-on-your-own-machine take on trend-tracking apps like TrendTok.
+A personal take on trend-tracking apps like TrendTok. It runs on your own computer or on Vercel.
 It shows what's trending on TikTok (hashtags, sounds, creators and videos) by
 country and time period, and scores each trend's momentum to flag the ones that
 are about to take off. You can keep a watchlist with notes.
@@ -18,6 +18,12 @@ npm test
 Change the port with `PORT=8080 npm start`.
 
 ## Features
+
+- **My Account** (once you log in with TikTok): followers and weekly change, your typical views and
+  engagement, a follower growth chart, a best-times-to-post grid, which video lengths and hashtags work
+  for you, every video with views, engagement, views gained this week and hit/low labels, videos that
+  are taking off right now, and trending hashtags you haven't used yet. It also gives plain-English
+  suggestions built from those numbers.
 
 - **Hashtags, Sounds, Creators and Videos** tabs, filterable by country (39) and by period (7, 30 or 120 days).
 - **Momentum score (0–100)** with a Breakout, Rising, Steady or Cooling label. The score uses
@@ -74,6 +80,14 @@ lib/trends.mjs             live → cache → sample loading, shared by the API 
 lib/hashtag-lookup.mjs     single-hashtag detail pages
 lib/alerts.mjs             keyword matching, scheduled collection, alert log
 lib/notify.mjs             desktop notifications
+lib/app.mjs                the request handler shared by server.mjs and Vercel
+lib/auth.mjs               sessions, login, token encryption
+lib/tiktok.mjs             TikTok Login Kit + Display API client
+lib/account.mjs            connected account: token refresh, sync, daily snapshots
+lib/analysis.mjs           the My Account numbers and suggestions
+lib/email.mjs              alert and weekly report emails (Resend)
+api/main.mjs               Vercel function entry point
+vercel.json                Vercel routing and the daily cron job
 lib/sample-data.mjs        offline sample data
 lib/store.mjs              JSON files in data/ (cache, history, series, watchlist, alerts)
 public/                    the UI (plain HTML, CSS and JS)
@@ -92,3 +106,63 @@ Alerts and daily collection only run while `npm start` is running. To have it st
 - **Windows**: create a shortcut to `cmd /c "cd /d C:\path\to\trendtok && node server.mjs"` in
   `shell:startup` (press Win+R, then type `shell:startup`).
 - **Linux**: add a systemd user service or an `@reboot` crontab entry.
+
+## Run it on Vercel
+
+1. **Import the repo:** in Vercel, go to Add New → Project, pick `trendtok`, and deploy. No build settings are needed.
+2. **Add storage:** open the project → Storage → Marketplace → **Upstash** (Redis) → create the database and
+   connect it to the project. That sets `KV_REST_API_URL` and `KV_REST_API_TOKEN` for you. Without it,
+   the app still runs, but anything it saves is lost between restarts.
+3. **Set environment variables:** go to Settings → Environment Variables, add the variables below, then redeploy.
+
+| Variable | Needed? | What it is |
+|---|---|---|
+| `SESSION_SECRET` | **Required** | Any random text, 32+ characters. It signs logins and encrypts your TikTok tokens. |
+| `APP_URL` | Recommended | Your production address, e.g. `https://trendtok-yourname.vercel.app` (no trailing slash). |
+| `CRON_SECRET` | Recommended | Any random text. Vercel sends it with the daily cron job, so nobody else can trigger it. |
+| `APP_PASSWORD` | Optional | Lets you log in with a password, which is handy before TikTok login is set up. |
+| `TIKTOK_CLIENT_KEY` / `TIKTOK_CLIENT_SECRET` | For TikTok login | From your TikTok developer app (see below). |
+| `TIKTOK_USERNAME` | For TikTok login | Your TikTok handle. **Only this account can log in.** |
+| `RESEND_API_KEY` / `ALERT_EMAIL` | For email | A [Resend](https://resend.com) API key and the address to send to. Without your own domain, Resend can only send to the address on your Resend account. |
+| `RESEND_FROM` | Optional | Sender, e.g. `TrendTok <alerts@yourdomain.com>` once you've verified a domain in Resend. |
+| `REPORT_TIMEZONE` | Optional | Time zone for the weekly email (default `America/Chicago`). |
+
+**How it runs on Vercel:**
+
+- The cron job in `vercel.json` runs once a day at 13:17 UTC, which is about 8am US Central. The Hobby plan
+  allows one run a day, at an approximate time within that hour. Each run:
+  - checks your alert keywords,
+  - syncs your TikTok account and saves the day's snapshot, and
+  - once a week, emails the report.
+- Alerts are sent by email instead of desktop notifications.
+- TikTok may block Creative Center requests from Vercel's servers more readily than from home internet. If it
+  does, the trend tabs show sample data with a warning. Your own account data is unaffected because it
+  uses TikTok's official API.
+
+## Connect your TikTok account
+
+This uses TikTok's official "Log in with TikTok". You approve access on TikTok's own page, and the app gets
+read-only access to your profile and public videos. It never sees your password.
+
+1. Go to [developers.tiktok.com](https://developers.tiktok.com/), log in with your TikTok account, and
+   create an app under **Manage apps**.
+2. Fill in the app details. For the links, use your Vercel address:
+   - Terms of service: `https://YOUR-APP.vercel.app/terms.html`
+   - Privacy policy: `https://YOUR-APP.vercel.app/privacy.html`
+3. Add the **Login Kit** product. For **Web**, set the redirect URI to
+   `https://YOUR-APP.vercel.app/api/auth/tiktok/callback`. This must match `APP_URL` exactly.
+4. Add these scopes: `user.info.basic`, `user.info.profile`, `user.info.stats` and `video.list`.
+5. **Use Sandbox mode** so you don't have to submit the app for review. Create a sandbox and add your own
+   TikTok account as a target user. Copy the sandbox's **Client key** and **Client secret** into Vercel as
+   `TIKTOK_CLIENT_KEY` and `TIKTOK_CLIENT_SECRET`, set `TIKTOK_USERNAME`, and redeploy.
+6. Open the app and click **Log in with TikTok**.
+
+TikTok changes its developer portal often, so the screens may not match these steps exactly.
+
+**What it can't see:** watch time, retention, traffic sources and follower demographics. The standard TikTok
+API doesn't provide them. Business accounts can get some of them through TikTok's separate Business API,
+which needs its own approval. That's a possible next step.
+
+**Running locally:** the same variables work with `npm start`. TikTok requires an HTTPS redirect URI, so
+local TikTok login needs a tunnel (for example `cloudflared tunnel --url http://localhost:5173`). Set
+`APP_URL` to the tunnel address and register that callback too.

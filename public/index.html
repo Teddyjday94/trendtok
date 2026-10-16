@@ -11,15 +11,17 @@
   <header class="top">
     <div class="brand">
       <img src="favicon.svg" alt="" width="28" height="28">
-      <span>TrendTok <em>Local</em></span>
+      <span>TrendTok <em id="brand-sub">Local</em></span>
     </div>
     <div class="top-right">
       <span id="source" class="badge" hidden></span>
       <button id="refresh" class="btn" type="button" title="Fetch fresh data now">Refresh</button>
+      <button id="logout" class="btn" type="button" hidden>Log out</button>
     </div>
   </header>
 
   <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="account">My Account</button>
     <button role="tab" data-tab="hashtags" aria-selected="true">Hashtags</button>
     <button role="tab" data-tab="sounds">Sounds</button>
     <button role="tab" data-tab="creators">Creators</button>
@@ -62,6 +64,15 @@
   <section id="summary" class="summary"></section>
 
   <main id="list" class="list" aria-live="polite"></main>
+
+  <div id="gate" class="gate" hidden>
+    <div class="gate-card">
+      <img src="favicon.svg" alt="" width="44" height="44">
+      <h1>TrendTok</h1>
+      <p id="gate-error" class="gate-error" hidden></p>
+      <div id="gate-body"></div>
+    </div>
+  </div>
 
   <aside id="drawer" class="drawer" hidden>
     <div class="drawer-card" role="dialog" aria-modal="true" aria-labelledby="d-title">
