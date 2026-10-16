@@ -53,21 +53,25 @@ Change the port with `PORT=8080 npm start`.
 
 ## Where the data comes from
 
-The server loads TikTok Creative Center's public "Popular" pages
-(`ads.tiktok.com/business/creativecenter/...`) from your machine and reads the
-trend list that's embedded in each page. Results are cached for 30 minutes in `data/cache.json`.
-Press **Refresh** to skip the cache.
+**Your account (My Account tab):** TikTok's official Login Kit and Display API, through "Log in with TikTok".
+This is the reliable part of the app.
 
-This isn't an official API, so:
+**Trends (Hashtags, Sounds, Creators, Videos, Lookup):** TikTok Creative Center. In October 2026 TikTok
+rebuilt Creative Center and put most of its data behind a TikTok for Business login. Without a login,
+the only public data is:
 
-- If TikTok changes the page layout or blocks the request, the app shows a yellow
-  banner and falls back to **sample data**, so it keeps working. The badge in the
-  header always tells you whether you're looking at **Live** or **Sample** data.
-- The parser doesn't depend on a fixed JSON path. It searches the page data for the list,
-  which gives it a better chance of surviving small layout changes. If it does break, the
-  logic is in `lib/creative-center.mjs`.
-- Each page only embeds its first batch of results (roughly the top 20–50).
-- Keep it to personal use and modest refresh rates. Check TikTok's terms of service yourself.
+- the **top 3 trending hashtags** per country, for the last 7 or 30 days, with their popularity curves,
+  post counts and views (`POST ads.tiktok.com/CreativeOne/KnowledgeAPI/GetHashtagList`).
+
+Everything else now answers "InvalidLogin" or "no permission": sounds, creators, videos, 120-day trends,
+and details for any single hashtag. Those tabs say so instead of showing made-up numbers, and
+**Lookup** can only find hashtags that are currently in the public top 3. Alerts still work against
+that list. Results are cached for 30 minutes; press **Refresh** to skip the cache.
+
+This isn't an official API, so TikTok can change it again. The code is in `lib/creative-center.mjs`.
+Keep it to personal use and check TikTok's terms of service yourself.
+
+`npm run offline` still runs the whole app on built-in sample data, which is useful for trying out the UI.
 
 ## Layout
 
@@ -76,7 +80,7 @@ server.mjs                 HTTP server and JSON API (/api/trends, /api/lookup, /
 lib/creative-center.mjs    fetches pages and extracts the embedded lists
 lib/normalize.mjs          maps raw records to one common shape
 lib/momentum.mjs           momentum score and status
-lib/trends.mjs             live → cache → sample loading, shared by the API and the collector
+lib/trends.mjs             live → cache loading (sample data only offline), shared by the API and the collector
 lib/hashtag-lookup.mjs     single-hashtag detail pages
 lib/alerts.mjs             keyword matching, scheduled collection, alert log
 lib/notify.mjs             desktop notifications
@@ -135,9 +139,8 @@ Alerts and daily collection only run while `npm start` is running. To have it st
   - syncs your TikTok account and saves the day's snapshot, and
   - once a week, emails the report.
 - Alerts are sent by email instead of desktop notifications.
-- TikTok may block Creative Center requests from Vercel's servers more readily than from home internet. If it
-  does, the trend tabs show sample data with a warning. Your own account data is unaffected because it
-  uses TikTok's official API.
+- Creative Center requests from Vercel work (tested October 2026), but see the limits under
+  "Where the data comes from".
 
 ## Connect your TikTok account
 

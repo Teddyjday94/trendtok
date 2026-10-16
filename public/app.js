@@ -215,11 +215,26 @@ function render() {
 
   const src = $('#source');
   src.hidden = false;
-  src.className = `badge ${d.source === 'sample' ? 'sample' : 'live'}`;
   const ago = Math.round((Date.now() - d.fetchedAt) / 60000);
-  src.textContent = d.source === 'sample' ? 'Sample data' : `Live · ${ago < 1 ? 'just now' : `${ago} min ago`}`;
-  $('#warning').hidden = !d.warning;
-  $('#warning').textContent = d.warning ?? '';
+  src.className = `badge ${d.source === 'live' || d.source === 'cache' ? 'live' : 'sample'}`;
+  src.textContent =
+    d.source === 'sample' ? 'Sample data' : d.source === 'unavailable' ? 'No public data' : `Live · ${ago < 1 ? 'just now' : `${ago} min ago`}`;
+  const notice = d.warning ?? d.note ?? null;
+  $('#warning').hidden = !notice;
+  $('#warning').textContent = notice ?? '';
+
+  if (d.source === 'unavailable') {
+    $('#summary').innerHTML = '';
+    rendered = [];
+    list.innerHTML = `<section class="panel connect">
+      <h2>${d.loginRequired ? 'TikTok now keeps this behind a login' : 'No trend data right now'}</h2>
+      <p>${esc(d.error)}</p>
+      ${tab === 'hashtags' ? '' : '<p class="note">The <b>Hashtags</b> tab still shows TikTok\'s public top hashtags, and <b>My Account</b> analyzes your own videos through TikTok\'s official API.</p>'}
+      <div class="actions">${tab === 'hashtags' ? '' : '<button class="btn" type="button" data-action="go-tab" data-tab="hashtags">Go to Hashtags</button>'}
+        <button class="btn" type="button" data-action="go-tab" data-tab="account">Go to My Account</button></div>
+    </section>`;
+    return;
+  }
 
   const count = (s) => d.items.filter((x) => x.status === s).length;
   $('#summary').innerHTML = [
@@ -378,7 +393,7 @@ function renderLookup() {
   $('#warning').hidden = true;
   if (!L) {
     const ideas = [...new Set([...keywords().map(cleanTag).filter(Boolean), ...LOOKUP_EXAMPLES])].slice(0, 10);
-    list.innerHTML = `<div class="empty">Look up any hashtag, even one that's not on the top charts.
+    list.innerHTML = `<div class="empty">Look up a hashtag. Without a Creative Center login, TikTok only shares details for its current top hashtags.
       <div class="chips center">${ideas.map((n) => `<button class="chip" type="button" data-action="lookup" data-name="${esc(n)}">#${esc(n)}</button>`).join('')}</div></div>`;
     return;
   }
@@ -393,8 +408,8 @@ function renderLookup() {
   const r = L.result;
   const src = $('#source');
   src.hidden = false;
-  src.className = `badge ${r.source === 'sample' ? 'sample' : 'live'}`;
-  src.textContent = r.source === 'sample' ? 'Sample data' : 'Live';
+  src.className = `badge ${r.source === 'live' || r.source === 'cache' ? 'live' : 'sample'}`;
+  src.textContent = r.source === 'sample' ? 'Sample data' : r.source === 'unavailable' ? 'No public data' : 'Live';
   $('#warning').hidden = !r.warning;
   $('#warning').textContent = r.warning ?? '';
   const alertBtn = `<button class="btn" type="button" data-action="toggle-keyword" data-name="${esc(r.name)}">
@@ -402,8 +417,7 @@ function renderLookup() {
 
   if (r.notFound) {
     list.innerHTML = `<div class="empty"><p>${esc(r.message)}.</p>
-      <p class="note">Creative Center only tracks hashtags with enough recent activity. Try another country or a longer period,
-      or add it as an alert keyword so the daily check tells you when it shows up.</p>
+      <p class="note">Add it as an alert keyword, and the daily check will tell you if it ever reaches TikTok's public top hashtags.</p>
       <div class="actions center">${alertBtn}</div></div>`;
     return;
   }
@@ -434,12 +448,14 @@ function renderLookup() {
     ${series.length > 1
       ? `<h3>Views over time · your checks</h3>${bigChart(series.map((p) => ({ t: p.at / 1000, v: p.views })), (v) => compact(v), chartW)}`
       : '<p class="note">Each time you look this up (or the daily check does), the numbers are saved, so a chart of your own builds up here.</p>'}
-    <div class="cols">
+    ${d.limited
+      ? '<p class="note">Audience age, countries and related hashtags now need a TikTok Creative Center login, so they aren\'t shown.</p>'
+      : `<div class="cols">
       <div><h3>Audience age</h3>${bars(d.audienceAges)}</div>
       <div><h3>Top countries</h3>${bars(d.audienceCountries)}</div>
       ${d.audienceInterests?.length ? `<div><h3>Interests</h3>${bars(d.audienceInterests)}</div>` : ''}
-    </div>
-    ${d.related?.length ? `<h3>Related hashtags</h3><div class="chips">${d.related
+    </div>`}
+    ${d.related?.length ? `<h3>${d.limited ? 'Also trending now' : 'Related hashtags'}</h3><div class="chips">${d.related
       .map((n) => `<button class="chip" type="button" data-action="lookup" data-name="${esc(n)}">#${esc(n)}</button>`)
       .join('')}</div>` : ''}
     <div class="actions">
@@ -616,6 +632,11 @@ function renderAlerts() {
 
 async function handleAction(btn) {
   const a = btn.dataset.action;
+  if (a === 'go-tab') {
+    prefs.tab = btn.dataset.tab;
+    savePrefs();
+    return load();
+  }
   if (a === 'sync-account') return loadAccount({ sync: true });
   if (a === 'all-videos') {
     state.showAllVideos = true;
@@ -783,7 +804,7 @@ function renderAccount() {
   <section class="panel">
     <h3>What the numbers say</h3>
     <ul class="insights">${a.insights.map((i) => `<li><span aria-hidden="true">${INSIGHT_ICONS[i.kind] ?? '•'}</span>${esc(i.text)}</li>`).join('')}</ul>
-    ${A.trendingSource == null || A.trendingSource === 'sample' ? '<p class="note">Trend matching is off until live trend data loads.</p>' : ''}
+    ${A.trendingSource !== 'live' && A.trendingSource !== 'cache' ? '<p class="note">Trend matching is off until live trend data loads.</p>' : ''}
   </section>
 
   ${a.trendingNew.length ? `<section class="panel"><h3>Trending now, not used by you yet</h3>

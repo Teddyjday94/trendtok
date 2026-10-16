@@ -4,7 +4,8 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { scoreMomentum } from '../lib/momentum.mjs';
-import { extractNextData, findRecords, buildUrl } from '../lib/creative-center.mjs';
+import { fetchLive } from '../lib/creative-center.mjs';
+import { ccItem, ccList } from './cc-fixtures.mjs';
 import { normalizeItem } from '../lib/normalize.mjs';
 import { sampleData } from '../lib/sample-data.mjs';
 import { createApp } from '../server.mjs';
@@ -25,48 +26,41 @@ test('momentum stays within 0-100 for extreme input', () => {
   assert.equal(scoreMomentum({}).momentum, 50);
 });
 
-// A cut-down page in the shape Creative Center serves: list nested deep in __NEXT_DATA__.
-const page = (data) =>
-  `<html><body><script id="__NEXT_DATA__" type="application/json">${JSON.stringify(data)}</script></body></html>`;
-const nextData = {
-  props: {
-    pageProps: {
-      industries: [{ id: 1, value: 'Food' }],
-      data: {
-        pagination: { page: 1 },
-        list: [
-          { hashtag_id: '1', hashtag_name: 'foodtok', rank: 1, publish_cnt: 1000, video_views: 5e6,
-            rank_diff_type: 1, rank_diff: 3, industry_info: { id: 1, value: 'Food' },
-            trend: [{ time: 2, value: 0.5 }, { time: 1, value: 0.2 }, { time: 3, value: 0.9 }] },
-          { hashtag_id: '2', hashtag_name: 'newtag', rank: 2, rank_diff_type: 4 },
-          { hashtag_id: '3', hashtag_name: 'falling', rank: 3, rank_diff_type: 3, rank_diff: 7 },
-        ],
-      },
-    },
-  },
-};
-
-test('finds the hashtag list wherever it sits in the page data', () => {
-  const data = extractNextData(page(nextData));
-  const recs = findRecords('hashtags', data);
-  assert.equal(recs.length, 3);
-  assert.equal(findRecords('sounds', data).length, 0);
-  assert.equal(extractNextData('<html>no data</html>'), null);
+test('reads the public hashtag list and normalizes it', async () => {
+  let sent;
+  const fetchImpl = async (url, init) => {
+    sent = { url, body: JSON.parse(init.body), headers: init.headers };
+    return ccList([ccItem('foodtok', 1, [20, 50, 90]), ccItem('newtag', 2), ccItem('falling', 3, [90, 50, 10])]);
+  };
+  const { items, note } = await fetchLive('hashtags', { country: 'GB', period: 30 }, fetchImpl);
+  assert.equal(sent.url, 'https://ads.tiktok.com/CreativeOne/KnowledgeAPI/GetHashtagList');
+  assert.deepEqual(sent.body, { timeRange: 30, countryCode: 'GB', page: 1, limit: 20 });
+  assert.equal(sent.headers['agw-js-conv'], 'str');
+  assert.equal(items.length, 3);
+  assert.equal(items[0].name, '#foodtok');
+  assert.equal(items[0].rank, 1);
+  assert.equal(items[0].posts, 1000);
+  assert.equal(items[0].url, 'https://www.tiktok.com/tag/foodtok');
+  assert.deepEqual(items[0].trend.map((p) => p.v), [20, 50, 90]);
+  assert.ok(items[0].momentum > items[2].momentum);
+  assert.match(note, /top 3/);
 });
 
-test('normalizes rank moves, trend order and industry', () => {
-  const [a, b, c] = findRecords('hashtags', nextData).map((r, i) => normalizeItem('hashtags', r, i));
-  assert.equal(a.name, '#foodtok');
+test('says plainly when TikTok has no public data', async () => {
+  await assert.rejects(fetchLive('sounds', {}, async () => assert.fail('no request expected')), (e) => e.loginRequired && /logged in/.test(e.message));
+  await assert.rejects(fetchLive('hashtags', { period: 120 }, async () => ccList([])), (e) => e.loginRequired && /120-day/.test(e.message));
+  const invalid = async () => Response.json({ BaseResp: { StatusCode: 38001001, StatusMessage: 'InvalidLogin' } });
+  await assert.rejects(fetchLive('hashtags', {}, invalid), (e) => e.loginRequired && /InvalidLogin/.test(e.message));
+});
+
+test('normalizes rank moves and trend order from older-style records', () => {
+  const a = normalizeItem('hashtags', { hashtag_id: '1', hashtag_name: 'foodtok', rank_diff_type: 1, rank_diff: 3, industry_info: { value: 'Food' },
+    trend: [{ time: 2, value: 0.5 }, { time: 1, value: 0.2 }, { time: 3, value: 0.9 }] }, 0);
   assert.equal(a.rankChange, 3);
   assert.equal(a.industry, 'Food');
   assert.deepEqual(a.trend.map((p) => p.t), [1, 2, 3]);
-  assert.equal(a.url, 'https://www.tiktok.com/tag/foodtok');
-  assert.equal(b.isNew, true);
-  assert.equal(c.rankChange, -7);
-});
-
-test('builds Creative Center URLs per kind', () => {
-  assert.match(buildUrl('sounds', { country: 'GB', period: 30 }), /popular\/music\/pc\/en\?countryCode=GB&period=30$/);
+  assert.equal(normalizeItem('hashtags', { hashtag_name: 'x', rank_diff_type: 4 }, 0).isNew, true);
+  assert.equal(normalizeItem('hashtags', { hashtag_name: 'y', rank_diff_type: 3, rank_diff: 7 }, 0).rankChange, -7);
 });
 
 test('sample data is stable and covers every kind', () => {
@@ -94,7 +88,7 @@ test('serves live data, caches it and records rank history', async () => {
   let calls = 0;
   const fetchImpl = async () => {
     calls++;
-    return new Response(page(nextData), { status: 200 });
+    return ccList([ccItem('foodtok', 1), ccItem('newtag', 2), ccItem('falling', 3)]);
   };
   await withServer({ fetchImpl }, async (base) => {
     const first = await (await fetch(`${base}/api/trends?kind=hashtags&country=US&period=7`)).json();
@@ -107,13 +101,16 @@ test('serves live data, caches it and records rank history', async () => {
   });
 });
 
-test('falls back to sample data with a warning when TikTok is unreachable', async () => {
+test('reports unavailable data instead of making it up', async () => {
   const fetchImpl = async () => new Response('blocked', { status: 403 });
   await withServer({ fetchImpl }, async (base) => {
-    const body = await (await fetch(`${base}/api/trends?kind=sounds`)).json();
-    assert.equal(body.source, 'sample');
-    assert.match(body.warning, /HTTP 403/);
-    assert.ok(body.items.length > 0);
+    const tags = await (await fetch(`${base}/api/trends?kind=hashtags`)).json();
+    assert.equal(tags.source, 'unavailable');
+    assert.match(tags.error, /HTTP 403/);
+    assert.deepEqual(tags.items, []);
+    const sounds = await (await fetch(`${base}/api/trends?kind=sounds`)).json();
+    assert.equal(sounds.source, 'unavailable');
+    assert.equal(sounds.loginRequired, true);
   });
 });
 

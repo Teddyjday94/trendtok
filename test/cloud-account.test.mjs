@@ -4,6 +4,7 @@ import { createAuth } from '../lib/auth.mjs';
 import { redisBackend, createStore } from '../lib/store.mjs';
 import { analyze, hashtagsOf } from '../lib/analysis.mjs';
 import { createApp } from '../server.mjs';
+import { ccItem, ccList } from './cc-fixtures.mjs';
 
 const SECRET = 'x'.repeat(40);
 const DAY = 86400_000;
@@ -107,9 +108,6 @@ test('analysis copes with no videos and an unknown time zone', () => {
 
 // ---------- the app in "Vercel" mode ----------
 
-const listPage = (items) =>
-  `<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({ props: { pageProps: { data: { list: items } } } })}</script>`;
-
 function fakeWorld({ username = 'washbros' } = {}) {
   const redis = fakeRedis();
   const calls = { emails: [], revoked: 0, refreshed: 0 };
@@ -146,10 +144,8 @@ function fakeWorld({ username = 'washbros' } = {}) {
       calls.emails.push(JSON.parse(init.body));
       return Response.json({ id: 'e1' });
     }
-    if (url.includes('/popular/hashtag/')) {
-      return new Response(listPage([{ hashtag_id: '1', hashtag_name: 'cleantok', rank: 1, trend: [{ time: 1, value: 0.1 }, { time: 2, value: 0.5 }, { time: 3, value: 0.9 }] }]));
-    }
-    return new Response(listPage([]));
+    if (url.includes('GetHashtagList')) return ccList([ccItem('cleantok', 1, [10, 50, 90])]);
+    return new Response('unexpected', { status: 404 });
   };
   return { redis, calls, fetchImpl };
 }

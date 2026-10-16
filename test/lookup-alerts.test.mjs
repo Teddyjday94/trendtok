@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { parseDetail, cleanHashtag, buildDetailUrl } from '../lib/hashtag-lookup.mjs';
+import { parseDetail, cleanHashtag } from '../lib/hashtag-lookup.mjs';
+import { ccItem, ccList, RISING as CC_RISING, FLAT as CC_FLAT } from './cc-fixtures.mjs';
 import { matchKeyword, validateSettings, createAlerts } from '../lib/alerts.mjs';
 import { createStore } from '../lib/store.mjs';
 import { sampleHashtagDetail } from '../lib/sample-data.mjs';
@@ -42,16 +43,13 @@ const detailPage = (name, trend = FLAT) =>
     },
   });
 
-const listPage = (items) => page({ props: { pageProps: { data: { list: items } } } });
-
 test('cleans hashtag input', () => {
   assert.equal(cleanHashtag('  #PressureWashing!! '), 'pressurewashing');
   assert.equal(cleanHashtag('pressure washing'), 'pressurewashing');
   assert.equal(cleanHashtag('##'), '');
-  assert.match(buildDetailUrl('foodtok', { country: 'GB', period: 30 }), /hashtag\/foodtok\/pc\/en\?countryCode=GB&period=30$/);
 });
 
-test('parses a hashtag detail page', () => {
+test('parses the full hashtag detail shape (used for offline sample data)', () => {
   const html = detailPage('pressurewashing', RISING);
   const data = JSON.parse(html.match(/>(\{.*\})</)[1]);
   const d = parseDetail('pressurewashing', data);
@@ -104,47 +102,36 @@ async function withServer(opts, fn) {
   }
 }
 
-test('lookup API: live, not found and fallback', async () => {
+test('lookup API: finds public top hashtags, explains the rest', async () => {
   let mode = 'live';
-  const fetchImpl = async (url) => {
-    if (mode === 'down') return new Response('nope', { status: 503 });
-    if (url.includes('/hashtag/pressurewashing/')) return new Response(detailPage('pressurewashing'));
-    return new Response(page({ props: { pageProps: {} } }));
-  };
+  const fetchImpl = async () =>
+    mode === 'down' ? new Response('nope', { status: 503 }) : ccList([ccItem('fyp', 1), ccItem('pressurewashing', 2, CC_RISING)]);
   await withServer({ fetchImpl }, async (call) => {
     const live = await call('/api/lookup?name=%23PressureWashing&country=US&period=7');
     assert.equal(live.body.source, 'live');
     assert.equal(live.body.detail.name, '#pressurewashing');
+    assert.equal(live.body.detail.rank, 2);
+    assert.equal(live.body.detail.limited, true);
+    assert.deepEqual(live.body.detail.related, ['fyp']);
     assert.equal(live.body.series.length, 1);
 
     const missing = await call('/api/lookup?name=zzzz');
     assert.equal(missing.body.notFound, true);
+    assert.match(missing.body.message, /isn't in TikTok's public top hashtags right now \(#fyp, #pressurewashing\)/);
 
     mode = 'down';
-    const fallback = await call('/api/lookup?name=brandnewtag');
-    assert.equal(fallback.body.source, 'sample');
-    assert.match(fallback.body.warning, /HTTP 503/);
+    const down = await call('/api/lookup?name=brandnewtag');
+    assert.equal(down.body.source, 'unavailable');
+    assert.match(down.body.message, /HTTP 503/);
+    assert.equal(down.body.detail, null);
 
     assert.equal((await call('/api/lookup?name=%23%23')).status, 400);
   });
 });
 
 test('alerts: chart entry, no repeats, then breakout; desktop notification sent', async () => {
-  let cleantokTrend = FLAT;
-  let tagTrend = FLAT;
-  const fetchImpl = async (url) => {
-    if (url.includes('/popular/hashtag/')) {
-      return new Response(
-        listPage([
-          { hashtag_id: '1', hashtag_name: 'fyp', rank: 1, trend: FLAT },
-          { hashtag_id: '2', hashtag_name: 'cleantok', rank: 2, trend: cleantokTrend },
-        ]),
-      );
-    }
-    if (url.includes('/hashtag/pressurewashing/')) return new Response(detailPage('pressurewashing', tagTrend));
-    if (url.includes('/hashtag/cleantok/')) return new Response(detailPage('cleantok', cleantokTrend));
-    return new Response(listPage([])); // other charts: empty, counted as errors
-  };
+  let cleantokCurve = CC_FLAT;
+  const fetchImpl = async () => ccList([ccItem('fyp', 1, CC_FLAT), ccItem('cleantok', 2, cleantokCurve)]);
   const notes = [];
   const notify = (title, message) => notes.push({ title, message });
 
@@ -161,19 +148,18 @@ test('alerts: chart entry, no repeats, then breakout; desktop notification sent'
     assert.equal(first.body.events.length, 1);
     assert.match(first.body.events[0].reason, /on the US hashtag chart at #2/);
     assert.equal(first.body.unread, 1);
-    assert.equal(first.body.settings.lastResult.charts, 1);
+    assert.equal(first.body.settings.lastResult.charts, 1, 'only hashtags are public');
     assert.equal(notes.length, 1);
 
     const second = await call('/api/alerts/run', { method: 'POST' });
     assert.equal(second.body.events.length, 1, 'no duplicate alert for the same chart entry');
 
-    cleantokTrend = RISING;
-    tagTrend = RISING;
+    cleantokCurve = CC_RISING;
     const third = await call('/api/alerts/run', { method: 'POST' });
     const reasons = third.body.events.map((e) => `${e.name} ${e.reason}`);
     assert.ok(reasons.some((r) => /#cleantok turned Breakout at #2/.test(r)), reasons.join('; '));
-    assert.ok(reasons.some((r) => /#pressurewashing turned Breakout in US/.test(r)), reasons.join('; '));
-    assert.equal(notes.at(-1).title, '3 new trend alerts');
+    assert.ok(reasons.some((r) => /#cleantok turned Breakout in US/.test(r)), reasons.join('; '));
+    assert.equal(notes.at(-1).title, '2 new trend alerts');
 
     const read = await call('/api/alerts/read', { method: 'POST' });
     assert.equal(read.body.unread, 0);
