@@ -29,6 +29,21 @@ Change the port with `PORT=8080 npm start`.
 - **Your rank history**: each live load (at most once an hour) records the ranks, so over time you
   get your own chart of how a trend has moved.
 - **Watchlist** with notes, saved to `data/watchlist.json`.
+- **Hashtag lookup** (Lookup tab): look up any hashtag, including ones that aren't on the top chart,
+  like #pressurewashing. It shows chart rank, momentum, posts and views for the period and all time,
+  the popularity curve, audience age and countries, and related hashtags (click one to look it up). Every
+  lookup saves the numbers, so a views-over-time chart of your own builds up.
+- **Niche alerts and daily collection** (Alerts tab): add keywords like "pressure washing" or "cleantok".
+  While the server runs, it pulls every chart for up to 3 countries on a schedule (every 24 hours by default,
+  plus a check shortly after start if one is due). That builds your rank history even if you never open the
+  page. You get an alert when something matching a keyword:
+  - appears on a hashtag, sound, creator or video chart (or comes back after dropping off), or
+  - turns Breakout, either on a chart or in its own hashtag lookup.
+
+  Alerts appear in the tab with an unread count, and rows that match a keyword are marked in the trend
+  lists. A desktop notification is also sent through your operating system (macOS notification centre,
+  Windows balloon, or `notify-send` on Linux), so it works with the browser closed. You can also allow
+  browser notifications for when the page is open.
 
 ## Where the data comes from
 
@@ -51,15 +66,29 @@ This isn't an official API, so:
 ## Layout
 
 ```
-server.mjs                 HTTP server and JSON API (/api/trends, /api/watchlist)
+server.mjs                 HTTP server and JSON API (/api/trends, /api/lookup, /api/watchlist, /api/alerts)
 lib/creative-center.mjs    fetches pages and extracts the embedded lists
 lib/normalize.mjs          maps raw records to one common shape
 lib/momentum.mjs           momentum score and status
+lib/trends.mjs             live → cache → sample loading, shared by the API and the collector
+lib/hashtag-lookup.mjs     single-hashtag detail pages
+lib/alerts.mjs             keyword matching, scheduled collection, alert log
+lib/notify.mjs             desktop notifications
 lib/sample-data.mjs        offline sample data
-lib/store.mjs              JSON files in data/ (cache, history, watchlist)
+lib/store.mjs              JSON files in data/ (cache, history, series, watchlist, alerts)
 public/                    the UI (plain HTML, CSS and JS)
 test/                      node:test suite
 ```
 
 The server only listens on 127.0.0.1. Set `HOST=0.0.0.0` if you want to open it from your
 phone on the same Wi-Fi network.
+
+## Keep it collecting
+
+Alerts and daily collection only run while `npm start` is running. To have it start at login:
+
+- **macOS**: create an Automator "Application" that runs `cd /path/to/trendtok && /usr/local/bin/node server.mjs`, then
+  add it under System Settings → General → Login Items.
+- **Windows**: create a shortcut to `cmd /c "cd /d C:\path\to\trendtok && node server.mjs"` in
+  `shell:startup` (press Win+R, then type `shell:startup`).
+- **Linux**: add a systemd user service or an `@reboot` crontab entry.

@@ -24,8 +24,15 @@
     <button role="tab" data-tab="sounds">Sounds</button>
     <button role="tab" data-tab="creators">Creators</button>
     <button role="tab" data-tab="videos">Videos</button>
+    <button role="tab" data-tab="lookup">Lookup</button>
     <button role="tab" data-tab="watchlist">Watchlist <span id="watch-count" class="count"></span></button>
+    <button role="tab" data-tab="alerts">Alerts <span id="alert-count" class="count alert"></span></button>
   </nav>
+
+  <form id="lookup-form" class="lookup-bar" hidden>
+    <input id="lookup-input" type="search" placeholder="Any hashtag, e.g. #pressurewashing" aria-label="Hashtag to look up" autocomplete="off">
+    <button class="btn primary" type="submit">Look up</button>
+  </form>
 
   <section class="controls" id="controls">
     <label>Country
@@ -39,7 +46,7 @@
     <label id="niche-wrap">Niche
       <select id="niche"><option value="">All niches</option></select>
     </label>
-    <label>Sort
+    <label class="list-only">Sort
       <select id="sort">
         <option value="rank">Rank</option>
         <option value="momentum">Momentum</option>
@@ -47,8 +54,8 @@
         <option value="change">Rank change</option>
       </select>
     </label>
-    <input id="search" type="search" placeholder="Search…" aria-label="Search">
-    <label class="check"><input id="rising" type="checkbox"> Rising only</label>
+    <input id="search" class="list-only" type="search" placeholder="Search…" aria-label="Search">
+    <label class="check list-only"><input id="rising" type="checkbox"> Rising only</label>
   </section>
 
   <div id="warning" class="warning" hidden></div>

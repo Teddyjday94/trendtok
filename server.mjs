@@ -4,15 +4,16 @@ import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fetchLive } from './lib/creative-center.mjs';
-import { sampleData } from './lib/sample-data.mjs';
 import { createStore } from './lib/store.mjs';
+import { createTrendService } from './lib/trends.mjs';
+import { createAlerts } from './lib/alerts.mjs';
+import { cleanHashtag } from './lib/hashtag-lookup.mjs';
+import { desktopNotify } from './lib/notify.mjs';
 import { KINDS } from './lib/normalize.mjs';
 
 const ROOT = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC = path.join(ROOT, 'public');
 const PERIODS = [7, 30, 120];
-const CACHE_MS = 30 * 60 * 1000;
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -43,87 +44,89 @@ async function readBody(req, limit = 16 * 1024) {
 }
 
 const clip = (v, max = 300) => (v == null ? null : String(v).slice(0, max));
+const countryParam = (q) => (/^[A-Z]{2}$/.test(q.get('country') ?? '') ? q.get('country') : 'US');
+const periodParam = (q) => (PERIODS.includes(Number(q.get('period'))) ? Number(q.get('period')) : 7);
 
-export function createApp({ dataDir = path.join(ROOT, 'data'), offline = false, fetchImpl } = {}) {
+export function createApp({
+  dataDir = path.join(ROOT, 'data'),
+  offline = false,
+  fetchImpl,
+  notify = desktopNotify,
+  delayMs,
+} = {}) {
   const store = createStore(dataDir);
+  const trends = createTrendService({ store, offline, fetchImpl });
+  const alerts = createAlerts({ store, trends, notify, offline, delayMs });
 
-  async function getTrends(q) {
-    const kind = KINDS.includes(q.get('kind')) ? q.get('kind') : 'hashtags';
-    const country = /^[A-Z]{2}$/.test(q.get('country') ?? '') ? q.get('country') : 'US';
-    const period = PERIODS.includes(Number(q.get('period'))) ? Number(q.get('period')) : 7;
-    const wantSample = offline || q.get('source') === 'sample';
-    const refresh = q.get('refresh') === '1';
-    const key = `${kind}:${country}:${period}`;
-    let result;
-
-    if (wantSample) {
-      result = { source: 'sample', fetchedAt: Date.now(), items: sampleData(kind, { country, period }) };
-    } else {
-      const cached = refresh ? null : await store.getCache(key, CACHE_MS);
-      if (cached) {
-        result = { source: 'cache', fetchedAt: cached.at, items: cached.items };
-      } else {
-        try {
-          const live = await fetchLive(kind, { country, period }, fetchImpl);
-          await store.setCache(key, { items: live.items });
-          result = { source: 'live', fetchedAt: Date.now(), items: live.items };
-        } catch (err) {
-          result = {
-            source: 'sample',
-            fetchedAt: Date.now(),
-            warning: `Live data unavailable (${err.message}). Showing sample data.`,
-            items: sampleData(kind, { country, period }),
-          };
-        }
-      }
-    }
-
-    // Only real data goes into your history; sample ranks would pollute it.
-    const history =
-      result.source === 'sample'
-        ? []
-        : result.source === 'live'
-          ? await store.recordHistory(kind, country, period, result.items)
-          : await store.getHistory(kind, country, period);
-    const items = result.items.map((item) => ({
-      ...item,
-      seen: history
-        .filter((h) => h.ranks[item.id] != null)
-        .slice(-60)
-        .map((h) => ({ at: h.at, rank: h.ranks[item.id] })),
-    }));
-    return { kind, country, period, ...result, items };
+  async function alertsPayload() {
+    const [settings, events] = await Promise.all([alerts.getSettings(), alerts.getEvents()]);
+    return { settings, events, unread: events.filter((e) => !e.read).length, running: alerts.isRunning(), offline };
   }
 
   async function handleApi(req, res, url) {
-    if (url.pathname === '/api/trends' && req.method === 'GET') {
-      return send(res, 200, await getTrends(url.searchParams));
+    const q = url.searchParams;
+    const route = `${req.method} ${url.pathname}`;
+
+    if (route === 'GET /api/trends') {
+      const kind = KINDS.includes(q.get('kind')) ? q.get('kind') : 'hashtags';
+      const { previous, ...data } = await trends.getTrends({
+        kind,
+        country: countryParam(q),
+        period: periodParam(q),
+        refresh: q.get('refresh') === '1',
+      });
+      return send(res, 200, data);
     }
-    if (url.pathname === '/api/watchlist') {
-      if (req.method === 'GET') return send(res, 200, await store.getWatchlist());
-      if (req.method === 'POST') {
-        const b = await readBody(req);
-        if (!KINDS.includes(b.kind) || !b.id || !b.name) {
-          return send(res, 400, { error: 'kind, id and name are required' });
-        }
-        const entry = {
-          kind: b.kind,
-          id: clip(b.id, 100),
-          name: clip(b.name),
-          subtitle: clip(b.subtitle),
-          url: /^https:\/\//.test(b.url ?? '') ? clip(b.url, 500) : null,
-          note: clip(b.note, 1000),
-        };
-        return send(res, 200, await store.addToWatchlist(entry));
-      }
-      if (req.method === 'DELETE') {
-        return send(
-          res,
-          200,
-          await store.removeFromWatchlist(url.searchParams.get('kind'), url.searchParams.get('id')),
-        );
-      }
+
+    if (route === 'GET /api/lookup') {
+      const name = cleanHashtag(q.get('name'));
+      if (!name) return send(res, 400, { error: 'Enter a hashtag to look up' });
+      return send(
+        res,
+        200,
+        await trends.lookupHashtag({ name, country: countryParam(q), period: periodParam(q), refresh: q.get('refresh') === '1' }),
+      );
     }
+
+    if (route === 'GET /api/watchlist') return send(res, 200, await store.getWatchlist());
+    if (route === 'POST /api/watchlist') {
+      const b = await readBody(req);
+      if (!KINDS.includes(b.kind) || !b.id || !b.name) {
+        return send(res, 400, { error: 'kind, id and name are required' });
+      }
+      const entry = {
+        kind: b.kind,
+        id: clip(b.id, 100),
+        name: clip(b.name),
+        subtitle: clip(b.subtitle),
+        url: /^https:\/\//.test(b.url ?? '') ? clip(b.url, 500) : null,
+        note: clip(b.note, 1000),
+      };
+      return send(res, 200, await store.addToWatchlist(entry));
+    }
+    if (route === 'DELETE /api/watchlist') {
+      return send(res, 200, await store.removeFromWatchlist(q.get('kind'), q.get('id')));
+    }
+
+    if (route === 'GET /api/alerts') return send(res, 200, await alertsPayload());
+    if (route === 'PUT /api/alerts/settings') {
+      await alerts.saveSettings(await readBody(req));
+      return send(res, 200, await alertsPayload());
+    }
+    if (route === 'POST /api/alerts/run') {
+      if (offline) return send(res, 409, { error: 'Checks need live data; the app is running in offline mode.' });
+      await alerts.run();
+      return send(res, 200, await alertsPayload());
+    }
+    if (route === 'POST /api/alerts/read') {
+      await alerts.markAllRead();
+      return send(res, 200, await alertsPayload());
+    }
+    if (route === 'DELETE /api/alerts/events') {
+      await alerts.clearEvents();
+      return send(res, 200, await alertsPayload());
+    }
+
     return send(res, 404, { error: 'Not found' });
   }
 
@@ -139,23 +142,27 @@ export function createApp({ dataDir = path.join(ROOT, 'data'), offline = false, 
     }
   }
 
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     try {
       if (url.pathname.startsWith('/api/')) await handleApi(req, res, url);
       else await handleStatic(req, res, url);
     } catch (err) {
-      console.error(err);
+      if (!err.status) console.error(err);
       send(res, err.status ?? 500, { error: err.status ? err.message : 'Internal error' });
     }
   });
+  server.alerts = alerts;
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || 5173;
   const host = process.env.HOST || '127.0.0.1';
   const offline = process.argv.includes('--offline') || process.env.TRENDTOK_OFFLINE === '1';
-  createApp({ offline }).listen(port, host, () => {
+  const server = createApp({ offline });
+  server.listen(port, host, () => {
     console.log(`TrendTok Local running at http://${host}:${port}${offline ? ' (offline sample data)' : ''}`);
+    if (!offline) server.alerts.startSchedule();
   });
 }
