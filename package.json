@@ -1,0 +1,13 @@
+{
+  "name": "trendtok-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Track and predict TikTok trends (hashtags, sounds, creators, videos) on your own machine.",
+  "type": "module",
+  "engines": { "node": ">=18.17" },
+  "scripts": {
+    "start": "node server.mjs",
+    "offline": "node server.mjs --offline",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TrendTok Local</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <img src="favicon.svg" alt="" width="28" height="28">
+      <span>TrendTok <em>Local</em></span>
+    </div>
+    <div class="top-right">
+      <span id="source" class="badge" hidden></span>
+      <button id="refresh" class="btn" type="button" title="Fetch fresh data now">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="hashtags" aria-selected="true">Hashtags</button>
+    <button role="tab" data-tab="sounds">Sounds</button>
+    <button role="tab" data-tab="creators">Creators</button>
+    <button role="tab" data-tab="videos">Videos</button>
+    <button role="tab" data-tab="watchlist">Watchlist <span id="watch-count" class="count"></span></button>
+  </nav>
+
+  <section class="controls" id="controls">
+    <label>Country
+      <select id="country"></select>
+    </label>
+    <div class="seg" id="period" role="group" aria-label="Period">
+      <button type="button" data-period="7" aria-pressed="true">7 days</button>
+      <button type="button" data-period="30">30 days</button>
+      <button type="button" data-period="120">120 days</button>
+    </div>
+    <label id="niche-wrap">Niche
+      <select id="niche"><option value="">All niches</option></select>
+    </label>
+    <label>Sort
+      <select id="sort">
+        <option value="rank">Rank</option>
+        <option value="momentum">Momentum</option>
+        <option value="views">Views / followers</option>
+        <option value="change">Rank change</option>
+      </select>
+    </label>
+    <input id="search" type="search" placeholder="Search…" aria-label="Search">
+    <label class="check"><input id="rising" type="checkbox"> Rising only</label>
+  </section>
+
+  <div id="warning" class="warning" hidden></div>
+  <section id="summary" class="summary"></section>
+
+  <main id="list" class="list" aria-live="polite"></main>
+
+  <aside id="drawer" class="drawer" hidden>
+    <div class="drawer-card" role="dialog" aria-modal="true" aria-labelledby="d-title">
+      <button class="close" id="d-close" type="button" aria-label="Close">×</button>
+      <div id="d-body"></div>
+    </div>
+  </aside>
+
+  <footer class="foot">
+    Data from TikTok Creative Center's public trend pages, fetched by your own machine.
+    Momentum scores are this app's estimate, not TikTok's.
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
