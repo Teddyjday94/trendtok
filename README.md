@@ -19,6 +19,10 @@ Change the port with `PORT=8080 npm start`.
 
 ## Features
 
+- **Search trends**: how many people search TikTok each month (US) for your keywords and related searches,
+  from TikTok's official Search Ads keyword tool. The app saves the counts daily and shows 7-day and 30-day
+  changes, marks searches that are rising (up 25% or more in a week), and sends an alert when one starts rising.
+
 - **My Account** (once you log in with TikTok): followers and weekly change, your typical views and
   engagement, a follower growth chart, a best-times-to-post grid, which video lengths and hashtags work
   for you, every video with views, engagement, views gained this week and hit/low labels, videos that
@@ -129,6 +133,8 @@ Alerts and daily collection only run while `npm start` is running. To have it st
 | `TIKTOK_USERNAME` | For TikTok login | Your TikTok handle. **Only this account can log in.** |
 | `RESEND_API_KEY` / `ALERT_EMAIL` | For email | A [Resend](https://resend.com) API key and the address to send to. Without your own domain, Resend can only send to the address on your Resend account. |
 | `RESEND_FROM` | Optional | Sender, e.g. `TrendTok <alerts@yourdomain.com>` once you've verified a domain in Resend. |
+| `TIKTOK_ADS_APP_ID` / `TIKTOK_ADS_SECRET` | For Search trends | From your TikTok for Business developer app (see "Search trends" below). |
+| `TIKTOK_ADVERTISER_ID` | Optional | Which ad account to use, if you have more than one. |
 | `REPORT_TIMEZONE` | Optional | Time zone for the weekly email (default `America/Chicago`). |
 
 **How it runs on Vercel:**
@@ -169,3 +175,21 @@ which needs its own approval. That's a possible next step.
 **Running locally:** the same variables work with `npm start`. TikTok requires an HTTPS redirect URI, so
 local TikTok login needs a tunnel (for example `cloudflared tunnel --url http://localhost:5173`). Set
 `APP_URL` to the tunnel address and register that callback too.
+
+## Search trends (TikTok for Business)
+
+This uses TikTok's **official** Marketing API (`GET /open_api/v1.3/tool/search_keyword/recommend/`). It reports
+monthly TikTok search counts in the US. The API gives today's count only, so the 7- and 30-day changes
+appear once the app has collected a week or a month of daily snapshots.
+
+1. **Have a TikTok Ads Manager account.** It's free, and no ad spend is needed.
+2. **Register as a developer** at [business-api.tiktok.com](https://business-api.tiktok.com/) ("Become a developer").
+3. **Create an app** under **My Apps**:
+   - Advertiser redirect URL: `https://YOUR-APP.vercel.app/api/auth/tiktok-ads/callback`
+   - Permission scopes: the ones covering **Tools** / Search Ads keyword tools (read-only). Nothing that creates or edits ads is needed.
+
+   TikTok reviews new developer apps before you can use them.
+4. **Add the app's details to Vercel.** Put the **App ID** and **Secret** in `TIKTOK_ADS_APP_ID` and `TIKTOK_ADS_SECRET`, then redeploy.
+5. **Connect.** Open the **Search trends** tab and click **Connect TikTok Ads**. The app stores the long-lived token encrypted. It can only read keyword data; it can't spend money.
+
+Alternatively, if you already have a Marketing API access token, set `TIKTOK_ADS_ACCESS_TOKEN` and `TIKTOK_ADVERTISER_ID` instead of steps 4–5.

@@ -203,6 +203,7 @@ function render() {
   if (tab === 'lookup') return renderLookup();
   if (tab === 'alerts') return renderAlerts();
   if (tab === 'account') return renderAccount();
+  if (tab === 'search') return renderSearch();
 
   const list = $('#list');
   if (state.loading && !state.data) {
@@ -329,6 +330,7 @@ const closeDrawer = () => {
 async function load({ refresh = false } = {}) {
   if (prefs.tab === 'lookup') return state.lookup?.name ? lookup(state.lookup.name, { refresh }) : render();
   if (prefs.tab === 'account') return loadAccount({ sync: refresh });
+  if (prefs.tab === 'search') return loadSearch({ refresh });
   if (!LIST_TABS.includes(prefs.tab)) return render();
   const id = ++state.requestId;
   state.loading = true;
@@ -632,6 +634,13 @@ function renderAlerts() {
 
 async function handleAction(btn) {
   const a = btn.dataset.action;
+  if (a === 'search-refresh') return loadSearch({ refresh: true });
+  if (a === 'rm-seed') return saveSeeds(state.search.seeds.filter((k) => k !== btn.dataset.k));
+  if (a === 'search-disconnect') {
+    if (!confirm('Disconnect TikTok Ads? Saved search history is kept.')) return;
+    state.search = await api('/api/search-trends/disconnect', { method: 'POST' });
+    return render();
+  }
   if (a === 'go-tab') {
     prefs.tab = btn.dataset.tab;
     savePrefs();
@@ -640,6 +649,10 @@ async function handleAction(btn) {
   if (a === 'sync-account') return loadAccount({ sync: true });
   if (a === 'all-videos') {
     state.showAllVideos = true;
+    return render();
+  }
+  if (a === 'all-searches') {
+    state.showAllSearches = true;
     return render();
   }
   if (a === 'disconnect') {
@@ -845,6 +858,123 @@ function renderAccount() {
   <div class="actions"><button class="btn" type="button" data-action="disconnect">Disconnect TikTok</button></div>`;
 }
 
+
+// ---------- search trends ----------
+const pctLabel = (p) => (p == null ? '—' : `${p > 0 ? '+' : ''}${p}%`);
+const pctClass = (p) => (p == null ? '' : p >= 0 ? 'up' : 'down');
+
+async function loadSearch({ refresh = false } = {}) {
+  state.searchLoading = true;
+  render();
+  try {
+    state.search = await api(`/api/search-trends${refresh ? '/refresh' : ''}`, refresh ? { method: 'POST' } : undefined);
+    state.searchError = null;
+  } catch (err) {
+    state.searchError = err.message;
+  } finally {
+    state.searchLoading = false;
+  }
+  render();
+}
+
+async function saveSeeds(seeds) {
+  state.searchLoading = true;
+  render();
+  try {
+    state.search = await api('/api/search-trends/seeds', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ seeds }),
+    });
+    state.searchError = null;
+  } catch (err) {
+    state.searchError = err.message;
+  } finally {
+    state.searchLoading = false;
+  }
+  render();
+}
+
+function renderSearch() {
+  $('#summary').innerHTML = '';
+  const list = $('#list');
+  const S = state.search;
+  $('#warning').hidden = !state.searchError && !S?.refreshError;
+  $('#warning').textContent = state.searchError || S?.refreshError || '';
+  if (!S) {
+    list.innerHTML = state.searchLoading ? '<div class="skeleton tall"></div>' : '';
+    return;
+  }
+  if (!S.connected) {
+    list.innerHTML = `<section class="panel connect">
+      <h2>See what people search for on TikTok</h2>
+      <p>This uses TikTok's official Search Ads keyword tool: you give it a few keywords (like “pressure washing”), and it returns
+      related searches with how many times a month each one is searched on TikTok in the US. The app saves the numbers every day,
+      so you can see which searches are growing.</p>
+      ${S.configured
+        ? '<div class="actions"><a class="btn primary" href="/api/auth/tiktok-ads">Connect TikTok Ads</a></div><p class="note">You approve on TikTok\'s page; the app gets read access to your ad account\'s tools. It can\'t spend money.</p>'
+        : '<p class="note">Not set up yet: this needs a free TikTok Ads Manager account and a TikTok for Business developer app. The README section “Search trends” has the steps; then set <code>TIKTOK_ADS_APP_ID</code> and <code>TIKTOK_ADS_SECRET</code> in Vercel.</p>'}
+    </section>`;
+    return;
+  }
+
+  const sort = prefs.searchSort || 'searches';
+  const sorters = {
+    searches: (a, b) => b.searches - a.searches,
+    change7d: (a, b) => (b.change7d ?? -1e9) - (a.change7d ?? -1e9),
+    change30d: (a, b) => (b.change30d ?? -1e9) - (a.change30d ?? -1e9),
+  };
+  const q = (state.searchFilter || '').toLowerCase();
+  const rows = S.rows.filter((r) => !q || r.keyword.includes(q)).sort(sorters[sort] ?? sorters.searches);
+  const shown = state.showAllSearches ? rows : rows.slice(0, 40);
+  const rising = S.rows.filter((r) => r.rising);
+  const seedTotal = S.rows.filter((r) => r.seed).reduce((a, r) => a + r.searches, 0);
+  const draft = $('#seed-input')?.value ?? '';
+
+  $('#summary').innerHTML = [
+    [S.rows.length, 'searches tracked'],
+    [compact(seedTotal), 'monthly searches for your keywords'],
+    [rising.length, `rising (+${S.risingPct}% in a week)`],
+    [S.historyDays, `day${S.historyDays === 1 ? '' : 's'} of history`],
+  ].map(([n, label]) => `<div class="stat"><b>${n}</b><span>${esc(label)}</span></div>`).join('');
+
+  list.innerHTML = `
+  <section class="panel">
+    <div class="panel-head"><h3>Your keywords</h3>
+      <div class="actions tight">
+        <button class="btn" type="button" data-action="search-refresh" ${state.searchLoading ? 'disabled' : ''}>${state.searchLoading ? 'Updating…' : 'Update now'}</button>
+      </div></div>
+    <div class="chips">${S.seeds.map((k) => `<span class="chip on">${esc(k)}${S.seeds.length > 1 ? `<button type="button" data-action="rm-seed" data-k="${esc(k)}" aria-label="Remove ${esc(k)}">×</button>` : ''}</span>`).join('')}</div>
+    ${S.seeds.length < 10 ? `<form id="seed-form" class="inline-form"><input id="seed-input" type="text" maxlength="80" placeholder="Add a service or topic, e.g. gutter cleaning" autocomplete="off"><button class="btn primary" type="submit">Add</button></form>` : ''}
+    <p class="note">TikTok suggests related searches for these (US only). ${S.fetchedAt ? `Updated ${timeAgo(S.fetchedAt)}; it updates daily.` : ''}
+      ${S.historyDays < 7 ? ' Weekly changes appear after 7 days of history, monthly ones after 30.' : ''}</p>
+  </section>
+
+  ${rising.length ? `<section class="panel"><h3>Rising this week</h3><div class="chips">${rising.slice(0, 12).map((r) => `<a class="chip" href="https://www.tiktok.com/search?q=${encodeURIComponent(r.keyword)}" target="_blank" rel="noopener">${esc(r.keyword)} <small class="pill-mini rising">${pctLabel(r.change7d)}</small></a>`).join('')}</div>
+    <p class="note">A video answering one of these searches has a better chance of being found.</p></section>` : ''}
+
+  <section class="panel">
+    <div class="panel-head"><h3>Searches on TikTok (US, per month)</h3>
+      <div class="actions tight">
+        <input id="search-filter" type="search" placeholder="Filter…" value="${esc(state.searchFilter || '')}" aria-label="Filter searches">
+        <select id="search-sort" aria-label="Sort">${[['searches', 'Most searched'], ['change7d', '7-day change'], ['change30d', '30-day change']].map(([v, l]) => `<option value="${v}" ${v === sort ? 'selected' : ''}>${l}</option>`).join('')}</select>
+      </div></div>
+    <div class="srow head"><span>Search</span><span>Monthly</span><span>7 days</span><span>30 days</span><span></span></div>
+    ${shown.map((r) => `<div class="srow">
+      <span class="name"><a href="https://www.tiktok.com/search?q=${encodeURIComponent(r.keyword)}" target="_blank" rel="noopener">${esc(r.keyword)}</a>
+        ${r.seed ? '<small class="pill-mini">yours</small>' : ''}${r.rising ? '<small class="pill-mini rising">rising</small>' : ''}${r.isNew ? '<small class="pill-mini breakout">new</small>' : ''}</span>
+      <span class="metric"><b>${compact(r.searches)}</b></span>
+      <span class="chg ${pctClass(r.change7d)}">${pctLabel(r.change7d)}</span>
+      <span class="chg ${pctClass(r.change30d)}">${pctLabel(r.change30d)}</span>
+      <span>${r.history.length > 1 ? sparkline(r.history, 90, 26) : ''}</span>
+    </div>`).join('') || '<p class="note">No searches match.</p>'}
+    ${rows.length > shown.length ? `<div class="actions center"><button class="btn" type="button" data-action="all-searches">Show all ${rows.length}</button></div>` : ''}
+  </section>
+  <div class="actions">${S.viaEnv ? '' : '<button class="btn" type="button" data-action="search-disconnect">Disconnect TikTok Ads</button>'}</div>`;
+  const input = $('#seed-input');
+  if (input) input.value = draft;
+}
+
 // ---------- login gate ----------
 function showGate(message) {
   const me = state.me ?? {};
@@ -880,8 +1010,9 @@ function showGate(message) {
 async function boot() {
   const params = new URLSearchParams(location.search);
   const authError = params.get('auth_error');
-  if (authError || location.hash === '#account') {
+  if (authError || location.hash === '#account' || location.hash === '#search') {
     if (location.hash === '#account') prefs.tab = 'account';
+    if (location.hash === '#search') prefs.tab = 'search';
     history.replaceState(null, '', location.pathname);
   }
   try {
@@ -920,7 +1051,7 @@ async function boot() {
 let resizeTimer;
 window.addEventListener('resize', () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => (prefs.tab === 'lookup' || prefs.tab === 'account') && render(), 150);
+  resizeTimer = setTimeout(() => (prefs.tab === 'lookup' || prefs.tab === 'account' || prefs.tab === 'search') && render(), 150);
 });
 $('#country').innerHTML = Object.entries(COUNTRIES)
   .map(([code, name]) => `<option value="${code}">${esc(name)}</option>`)
@@ -963,6 +1094,12 @@ $('#lookup-form').addEventListener('submit', (e) => {
   lookup($('#lookup-input').value);
 });
 $('#list').addEventListener('submit', (e) => {
+  if (e.target.id === 'seed-form') {
+    e.preventDefault();
+    const value = $('#seed-input').value.trim();
+    if (value) saveSeeds([...state.search.seeds, value]);
+    return;
+  }
   if (e.target.id !== 'kw-form') return;
   e.preventDefault();
   const value = $('#kw-input').value.trim();
@@ -970,11 +1107,24 @@ $('#list').addEventListener('submit', (e) => {
   $('#kw-input').value = '';
   saveAlertSettings({ keywords: [...keywords(), value] });
 });
+$('#list').addEventListener('input', (e) => {
+  if (e.target.id !== 'search-filter') return;
+  state.searchFilter = e.target.value;
+  const pos = e.target.selectionStart;
+  render();
+  const box = $('#search-filter');
+  box.focus();
+  box.setSelectionRange(pos, pos);
+});
 $('#list').addEventListener('change', (e) => {
   if (e.target.id === 'country-add' && e.target.value) {
     saveAlertSettings({ countries: [...state.alerts.settings.countries, e.target.value] });
   } else if (e.target.id === 'interval') {
     saveAlertSettings({ intervalHours: Number(e.target.value) });
+  } else if (e.target.id === 'search-sort') {
+    prefs.searchSort = e.target.value;
+    savePrefs();
+    render();
   } else if (e.target.id === 'video-sort') {
     prefs.videoSort = e.target.value;
     savePrefs();
